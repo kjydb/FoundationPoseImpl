@@ -226,3 +226,4 @@ fp_debug/
 fp_logs/
 fp_snapshots/
 commands.txt
+*_log.png
