@@ -101,7 +101,7 @@ def load_foundationpose(fp_root):
     if fp_root:
         sys.path.insert(0, os.path.abspath(fp_root))
     # estimater.py 가 저장소 루트에 있다.
-    from estimater import FoundationPose, ScorePredictor, PoseRefinePredictor
+    from estimater import FoundationPose, ScorePredictor, PoseRefinePredictor  # pyright: ignore[reportMissingImports]
     import nvdiffrast.torch as dr
     return FoundationPose, ScorePredictor, PoseRefinePredictor, dr
 
@@ -187,7 +187,7 @@ class PoseEngine:
         시작해서 42뷰 밑으로 못 내려간다. 그래서 세분화 단계를 직접 강제한다.
             subdiv 0 -> 12뷰,  1 -> 42뷰(기본),  2 -> 162뷰
         """
-        import estimater as fp_mod
+        import estimater as fp_mod  # pyright: ignore[reportMissingImports]
 
         if subdiv is not None:
             orig = fp_mod.sample_views_icosphere
