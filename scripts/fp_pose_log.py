@@ -39,6 +39,25 @@ def mat_to_quat(R):
     return q / np.linalg.norm(q)
 
 
+def quat_to_mat(q):
+    """쿼터니언 (w, x, y, z) -> 3x3 회전행렬. 정규화 안 된 입력도 받는다
+    (One Euro filter로 성분별로 스무딩한 뒤라 노름이 1에서 살짝 벗어날 수 있음)."""
+    q = np.asarray(q, dtype=np.float64)
+    n = float(np.dot(q, q))
+    if n < 1e-12:
+        return np.eye(3)
+    s = 2.0 / n
+    w, x, y, z = q
+    wx, wy, wz = s * w * x, s * w * y, s * w * z
+    xx, xy, xz = s * x * x, s * x * y, s * x * z
+    yy, yz, zz = s * y * y, s * y * z, s * z * z
+    return np.array([
+        [1.0 - (yy + zz), xy - wz, xz + wy],
+        [xy + wz, 1.0 - (xx + zz), yz - wx],
+        [xz - wy, yz + wx, 1.0 - (xx + yy)],
+    ])
+
+
 def mat_to_euler_deg(R):
     """3x3 회전행렬 -> (roll, pitch, yaw) 도(deg). 화면 표시용, 짐벌락 근처에서만 근사."""
     m = np.asarray(R, dtype=np.float64)

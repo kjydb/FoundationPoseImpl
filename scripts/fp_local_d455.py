@@ -76,6 +76,7 @@ from fp_camera import D455, downscale
 from fp_mask import mask_from_box, make_mask_from_roi
 from fp_visualize import draw_posed_3d_box, draw_xyz_axis
 from fp_pose_log import mat_to_euler_deg, PoseLog
+from fp_one_euro import PoseOneEuroFilter
 
 
 def main():
@@ -158,6 +159,30 @@ def main():
                          "both=둘 다")
     ap.add_argument("--overlay-alpha", type=float, default=0.6,
                     help="--vis-mode mesh/both일 때 렌더링된 mesh의 불투명도 (0~1)")
+    ap.add_argument("--filter-type", default="none", choices=["none", "one-euro"],
+                    help="pose 출력에 걸 후처리 필터. none=끄기(기본), "
+                         "one-euro=One Euro filter. FoundationPose 내부 추적 "
+                         "상태에는 영향 없음 -- 표시/로깅용 후처리다. register "
+                         "직후(새 앵커)엔 자동으로 리셋된다")
+    ap.add_argument("--no-filter-pos", action="store_true",
+                    help="--filter-type이 켜져 있어도 위치(x,y,z) 채널은 "
+                         "필터링하지 않고 원값 그대로 둔다")
+    ap.add_argument("--no-filter-rot", action="store_true",
+                    help="--filter-type이 켜져 있어도 회전(쿼터니언) 채널은 "
+                         "필터링하지 않고 원값 그대로 둔다")
+    ap.add_argument("--one-euro-pos-mincutoff", type=float, default=1.0,
+                    help="[one-euro] 위치 채널 mincutoff(Hz). 낮출수록 정지 시 "
+                         "더 세게 스무딩(반응은 느려짐)")
+    ap.add_argument("--one-euro-pos-beta", type=float, default=0.0,
+                    help="[one-euro] 위치 채널 beta. 높일수록 빠른 움직임을 "
+                         "덜 지체하며 따라간다")
+    ap.add_argument("--one-euro-rot-mincutoff", type=float, default=1.0,
+                    help="[one-euro] 회전 채널(쿼터니언) mincutoff(Hz)")
+    ap.add_argument("--one-euro-rot-beta", type=float, default=0.0,
+                    help="[one-euro] 회전 채널(쿼터니언) beta")
+    ap.add_argument("--one-euro-dcutoff", type=float, default=1.0,
+                    help="[one-euro] 속도 추정 자체에 쓰이는 cutoff. 보통 "
+                         "기본값(1.0)에서 안 건드림")
     ap.add_argument("--pose-log", default=None,
                     help="pose를 JSON Lines로 기록할 파일 경로")
     ap.add_argument("--snapshot-dir", default="./fp_snapshots",
@@ -177,8 +202,6 @@ def main():
     if args.no_window and not args.init_roi:
         ap.error("--no-window 를 쓰면 --init-roi 'x,y,w,h' 가 필요하다")
 
-    # 카메라를 먼저 연다. 모델 로딩(수십 초)에 시간을 쓴 뒤에야
-    # "카메라가 안 잡힌다"는 걸 알게 되는 상황을 피한다.
     cam = D455(args.width, args.height, args.fps,
                filter_depth=not args.no_depth_filter,
                bag=args.bag, repeat_bag=args.repeat_bag,
@@ -191,6 +214,17 @@ def main():
     logger = PoseLog(args.pose_log) if args.pose_log else None
     os.makedirs(args.snapshot_dir, exist_ok=True)
 
+    pose_filter = None
+    if args.filter_type == "one-euro":
+        if args.no_filter_pos and args.no_filter_rot:
+            print("[main] !! --no-filter-pos와 --no-filter-rot을 같이 주면 "
+                  "필터가 아무 채널도 안 건드림 (--filter-type none과 동일)")
+        pose_filter = PoseOneEuroFilter(
+            pos_mincutoff=args.one_euro_pos_mincutoff, pos_beta=args.one_euro_pos_beta,
+            rot_mincutoff=args.one_euro_rot_mincutoff, rot_beta=args.one_euro_rot_beta,
+            dcutoff=args.one_euro_dcutoff,
+            filter_pos=not args.no_filter_pos, filter_rot=not args.no_filter_rot)
+
     frame_id = 0
     need_init = True
     bbox, to_origin = engine.bbox, engine.to_origin
@@ -199,9 +233,6 @@ def main():
     win = "FoundationPose (local)"
     if not args.no_window:
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        # WINDOW_NORMAL은 첫 imshow 전까지 임의의(보통 작은) 기본 크기로 뜬다.
-        # 실제 표시될 프레임 해상도(캡처 해상도 x --scale)로 미리 맞춰
-        # 마우스로 테두리를 끌지 않아도 되게 한다.
         disp_w = int(round(cam.width * args.scale))
         disp_h = int(round(cam.height * args.scale))
         cv2.resizeWindow(win, disp_w, disp_h)
@@ -232,6 +263,8 @@ def main():
                         break               # 헤드리스에서는 무한 재시도 금지
                     continue
                 need_init = False
+                if pose_filter is not None:
+                    pose_filter.reset()
                 print(f"[main] register 완료 ({engine.last_infer_ms:.0f} ms)")
             else:
                 pose = engine.track(color, depth, cam.depth_scale, K)
@@ -241,6 +274,11 @@ def main():
                     if args.no_window:
                         break
                     continue
+
+            if pose_filter is not None:
+                # register 프레임 직후엔 reset() 때문에 원값 그대로 통과되고,
+                # 이후 track 프레임부터 실제로 스무딩된다.
+                pose = pose_filter.filter(pose, time.time())
 
             if logger is not None:
                 logger.write(frame_id, pose, engine.last_infer_ms)
