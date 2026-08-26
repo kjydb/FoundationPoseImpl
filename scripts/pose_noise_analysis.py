@@ -39,9 +39,9 @@ import numpy as np
 # ==================================================================== 로드
 
 
-def load_log(path):
+def load_log(path, file_name):
     frame_id, stamp, t, q = [], [], [], []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path + file_name, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -52,7 +52,7 @@ def load_log(path):
             t.append(rec["t"])
             q.append(rec["q_wxyz"])
     if len(frame_id) < 3:
-        raise ValueError(f"{path}: 유효한 레코드가 너무 적다 ({len(frame_id)}개)")
+        raise ValueError(f"{path+file_name}: 유효한 레코드가 너무 적다 ({len(frame_id)}개)")
     return (np.asarray(frame_id, dtype=np.int64),
             np.asarray(stamp, dtype=np.float64),
             np.asarray(t, dtype=np.float64),      # (N,3) meters
@@ -239,7 +239,7 @@ def print_report(frame_id, stamp, results, skipped, pooled_still, pooled_moving)
         print()
 
 
-def make_plot(frame_id, t_mm, pos_smooth_mm, results, out_path):
+def make_plot(frame_id, t_mm, pos_smooth_mm, results, out_path, out_name):
     import matplotlib
     if out_path:
         matplotlib.use("Agg")
@@ -275,9 +275,9 @@ def make_plot(frame_id, t_mm, pos_smooth_mm, results, out_path):
     fig.suptitle("Pose noise analysis (shaded = still / moving segments)")
     fig.tight_layout()
 
-    if out_path:
-        fig.savefig(out_path, dpi=150)
-        print(f"[plot] 저장: {out_path}")
+    if out_path and out_name:
+        fig.savefig(out_path + out_name, dpi=150)
+        print(f"[plot] 저장: {out_path+out_name}")
     else:
         plt.show()
 
@@ -288,7 +288,8 @@ def make_plot(frame_id, t_mm, pos_smooth_mm, results, out_path):
 def main():
     ap = argparse.ArgumentParser(
         description="fp_local_d455.py --pose-log 로그의 정지/움직임 노이즈 분석")
-    ap.add_argument("--log", required=True, help="--pose-log로 기록한 .jsonl 경로")
+    ap.add_argument("--log-dir", required=True, help='로그 파일이 있는 경로. 파일이름 제외')
+    ap.add_argument("--log-name", required=True, help="--pose-log로 기록한 .jsonl 이름")
     ap.add_argument("--smooth-window", type=int, default=7,
                     help="움직임 구간에서 노이즈를 뺄 '추세' 기준선을 만드는 "
                          "이동평균 윈도(프레임, 홀수). 너무 크면 실제 움직임까지 "
@@ -309,8 +310,8 @@ def main():
                     help="그래프를 파일로 저장 (지정 안 하면 화면에 표시)")
     args = ap.parse_args()
 
-    frame_id, stamp, t, q = load_log(args.log)
-    print(f"[log] {args.log} 로드: 프레임 {len(frame_id)}개, "
+    frame_id, stamp, t, q = load_log(args.log_dir, args.log_name)
+    print(f"[log] {args.log_dir+args.log_name} 로드: 프레임 {len(frame_id)}개, "
           f"{stamp[-1] - stamp[0]:.1f}s")
 
     q_fixed = fix_quat_continuity(q)
@@ -340,7 +341,10 @@ def main():
                  pooled_stats(still_segs), pooled_stats(moving_segs))
 
     if args.plot:
-        make_plot(frame_id, t_mm, pos_smooth_mm, results, args.plot_out)
+        name_split = args.log_name.rsplit('.', 1)
+        plot_name = name_split[0]
+        plot_name_full = plot_name + '_plot.png'
+        make_plot(frame_id, t_mm, pos_smooth_mm, results, args.log_dir, plot_name_full)
 
 
 if __name__ == "__main__":
