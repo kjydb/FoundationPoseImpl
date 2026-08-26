@@ -468,6 +468,46 @@ class PoseEngine:
 # ==================================================================== 카메라
 
 
+def _find_sensor_by_name(dev, name):
+    for s in dev.query_sensors():
+        if s.get_info(rs.camera_info.name) == name:
+            return s
+    return None
+
+
+def _set_manual_color(dev, exposure, white_balance):
+    """AE/AWB를 끄고 고정값을 준다. 프레임마다 밝기·색이 바뀌면 RGB 입력이
+    흔들려서 pose도 따라 흔들린다 -- 조명이 일정한 환경이 전제다."""
+    if exposure is None and white_balance is None:
+        return
+    color = _find_sensor_by_name(dev, "RGB Camera")
+    if color is None:
+        print("[cam] !! RGB Camera 센서를 못 찾음 - exposure/white-balance 설정 건너뜀")
+        return
+    if exposure is not None:
+        color.set_option(rs.option.enable_auto_exposure, 0)
+        color.set_option(rs.option.exposure, float(exposure))
+        print(f"[cam] 수동 노출: exposure={exposure} (100us 단위)")
+    if white_balance is not None:
+        color.set_option(rs.option.enable_auto_white_balance, 0)
+        color.set_option(rs.option.white_balance, float(white_balance))
+        print(f"[cam] 수동 화이트밸런스: {white_balance}K")
+
+
+def _set_laser_power(dev, power):
+    """IR 구조광 파워를 올려 유효 depth 픽셀 수를 늘린다."""
+    if power is None:
+        return
+    depth_sensor = dev.first_depth_sensor()
+    if not depth_sensor.supports(rs.option.laser_power):
+        print("[cam] !! 이 장치는 laser_power를 지원하지 않음")
+        return
+    rng = depth_sensor.get_option_range(rs.option.laser_power)
+    val = float(np.clip(power, rng.min, rng.max))
+    depth_sensor.set_option(rs.option.laser_power, val)
+    print(f"[cam] IR 레이저 파워: {val:.0f} (범위 {rng.min:.0f}~{rng.max:.0f})")
+
+
 class D455:
     """align된 컬러/뎁스 프레임과 컬러 intrinsics를 내주는 얇은 래퍼.
 
@@ -477,7 +517,9 @@ class D455:
     """
 
     def __init__(self, width=848, height=480, fps=30, filter_depth=True,
-                 bag=None, repeat_bag=False, depth_min=0.2, depth_max=4.0):
+                 bag=None, repeat_bag=False, depth_min=0.2, depth_max=4.0,
+                 exposure=None, white_balance=None, laser_power=None,
+                 temporal_alpha=None):
         if rs is None:
             raise RuntimeError("pyrealsense2가 없다. pip install pyrealsense2")
 
@@ -502,6 +544,11 @@ class D455:
 
         dev = self.profile.get_device()
         self.depth_scale = dev.first_depth_sensor().get_depth_scale()  # 보통 0.001
+
+        if not bag:
+            # bag 재생에는 실제 센서가 없어 옵션 자체가 없다.
+            _set_manual_color(dev, exposure, white_balance)
+            _set_laser_power(dev, laser_power)
 
         intr = (self.profile.get_stream(rs.stream.color)
                 .as_video_stream_profile().get_intrinsics())
@@ -533,6 +580,10 @@ class D455:
             # 최근 프레임 비중을 높여야 한다. 예:
             #   self._temporal.set_option(rs.option.filter_smooth_alpha, 0.7)
             self._temporal = rs.temporal_filter()
+            if temporal_alpha is not None:
+                self._temporal.set_option(rs.option.filter_smooth_alpha,
+                                          float(temporal_alpha))
+                print(f"[cam] temporal filter alpha = {temporal_alpha}")
 
             # mode 2 = "Nearest from around": 구멍을 배경(먼 값)이 아니라 전경
             # 쪽 값으로 채운다. 기본 mode 1("Farest from around")은 광택/검은
@@ -793,6 +844,20 @@ def main():
                     help=".bag을 반복 재생")
     ap.add_argument("--no-depth-filter", action="store_true")
     ap.add_argument("--no-mask-refine", action="store_true")
+    ap.add_argument("--exposure", type=int, default=None,
+                    help="컬러 센서 수동 노출(100us 단위). 주면 자동노출을 끈다. "
+                         "조명이 일정한 환경에서 프레임간 밝기 흔들림을 없애 "
+                         "정지 노이즈를 줄이는 데 도움된다")
+    ap.add_argument("--white-balance", type=int, default=None,
+                    help="컬러 센서 수동 화이트밸런스(Kelvin). 주면 자동WB를 끈다")
+    ap.add_argument("--laser-power", type=float, default=None,
+                    help="IR 구조광 파워. 높일수록 유효 depth 픽셀이 늘지만 "
+                         "너무 가까운 거리에서는 과포화될 수 있다")
+    ap.add_argument("--temporal-alpha", type=float, default=None,
+                    help="depth temporal filter의 smooth_alpha. 기본은 SDK 기본값"
+                         "(0.4)을 그대로 둔다. 낮출수록 정지 시 노이즈는 줄지만 "
+                         "물체가 움직이면 경계에 잔상(smear)이 생기니, 물체가 "
+                         "계속 정지해 있는 경우에만 낮출 것")
 
     # ---- 추정
     ap.add_argument("--est-refine-iter", type=int, default=5)
@@ -844,7 +909,9 @@ def main():
     # "카메라가 안 잡힌다"는 걸 알게 되는 상황을 피한다.
     cam = D455(args.width, args.height, args.fps,
                filter_depth=not args.no_depth_filter,
-               bag=args.bag, repeat_bag=args.repeat_bag)
+               bag=args.bag, repeat_bag=args.repeat_bag,
+               exposure=args.exposure, white_balance=args.white_balance,
+               laser_power=args.laser_power, temporal_alpha=args.temporal_alpha)
     print(f"[cam] {cam.width}x{cam.height}, depth_scale={cam.depth_scale}")
     print(f"[cam] K =\n{cam.K}")
 
