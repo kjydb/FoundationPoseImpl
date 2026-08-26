@@ -62,6 +62,7 @@ VRAM
 import argparse
 import os
 import time
+import datetime
 
 # torch가 import되기 *전에* 설정해야 효과가 있다. 캐싱 할당자가 큰 블록을
 # 잘게 쪼개 쥐고 있는 파편화를 줄여, nvidia-smi에 찍히는 reserved 값을 낮춘다.
@@ -187,6 +188,12 @@ def main():
                     help="pose를 JSON Lines로 기록할 파일 경로")
     ap.add_argument("--snapshot-dir", default="./fp_snapshots",
                     help="'s' 키로 저장할 스냅샷 폴더")
+    ap.add_argument("--record", action="store_true",
+                    help="추적 화면(오버레이 포함)을 ./videos/ 에 "
+                         "%%Y-%%m-%%d_%%H:%%M:%%S.mp4 로 저장한다. --no-window와는 "
+                         "같이 쓸 수 없다(화면 렌더링이 없으면 저장할 프레임도 없음)")
+    ap.add_argument("--record-fps", type=float, default=30,
+                    help="--record로 저장할 영상의 타겟 fps")
     ap.add_argument("--no-window", action="store_true",
                     help="GUI 없이 돌린다(헤드리스). ROI 대신 --init-roi 필요")
     ap.add_argument("--init-roi", default=None,
@@ -201,6 +208,8 @@ def main():
 
     if args.no_window and not args.init_roi:
         ap.error("--no-window 를 쓰면 --init-roi 'x,y,w,h' 가 필요하다")
+    if args.record and args.no_window:
+        ap.error("--record 는 --no-window 와 같이 쓸 수 없다")
 
     cam = D455(args.width, args.height, args.fps,
                filter_depth=not args.no_depth_filter,
@@ -236,6 +245,16 @@ def main():
         disp_w = int(round(cam.width * args.scale))
         disp_h = int(round(cam.height * args.scale))
         cv2.resizeWindow(win, disp_w, disp_h)
+
+    video_writer = None
+    if args.record:
+        os.makedirs("./videos", exist_ok=True)
+        video_name = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + ".mp4"
+        video_path = os.path.join("./videos", video_name)
+        video_writer = cv2.VideoWriter(
+            video_path, cv2.VideoWriter_fourcc(*"mp4v"), args.record_fps,
+            (disp_w, disp_h))
+        print(f"[main] 영상 저장: {video_path}")
 
     try:
         while True:
@@ -312,6 +331,8 @@ def main():
                             (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 0, 0), 2, cv2.LINE_AA)
                 cv2.imshow(win, vis)
+                if video_writer is not None:
+                    video_writer.write(vis)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
@@ -343,6 +364,8 @@ def main():
         cam.close()
         if logger is not None:
             logger.close()
+        if video_writer is not None:
+            video_writer.release()
         cv2.destroyAllWindows()
         print(f"[main] 종료. 처리 프레임 {frame_id}")
 
