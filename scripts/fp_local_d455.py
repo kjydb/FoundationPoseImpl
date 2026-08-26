@@ -595,6 +595,11 @@ class D455:
             for _ in range(30):
                 self.pipeline.wait_for_frames()
 
+        if False:
+            color = _find_sensor_by_name(dev, "RGB Camera")
+            print("현재 exposure:", color.get_option(rs.option.exposure))
+            print("현재 white_balance:", color.get_option(rs.option.white_balance))
+
     def _latest_frames(self):
         """큐를 비우고 가장 최근 프레임셋을 돌려준다."""
         frames = self.pipeline.wait_for_frames()
