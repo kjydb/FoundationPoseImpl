@@ -222,4 +222,7 @@ __marimo__/
 # dev
 .vscode/
 data/
+fp_debug/
+fp_logs/
+fp_snapshots/
 commands.txt
