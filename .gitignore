@@ -225,5 +225,6 @@ data/
 fp_debug/
 fp_logs/
 fp_snapshots/
+videos/
 commands.txt
 *_log.png
