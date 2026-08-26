@@ -49,6 +49,7 @@ VRAM
 """
 
 import argparse
+from datetime import datetime
 import json
 import logging
 import os
@@ -743,8 +744,10 @@ class PoseLog:
     """pose를 JSON Lines로 흘려 쓴다. 디지털 트윈 쪽에서 그대로 읽어 쓰면 된다."""
 
     def __init__(self, path):
-        self.f = open(path, "w", encoding="utf-8")
-        print(f"[log] pose 기록: {path}")
+        now = datetime.now()
+        full_path = path + now.strftime('%Y-%m-%d_%H:%M:%S') + '.jsonl'
+        self.f = open(full_path, "w", encoding="utf-8")
+        print(f"[log] pose 기록: {full_path}")
 
     def write(self, frame_id, pose, infer_ms):
         rec = {
