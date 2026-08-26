@@ -101,6 +101,49 @@ def normalize_rows(x):
     return x / n
 
 
+def quat_mul_batch(q1, q2):
+    """해밀턴 곱. q1,q2: (N,4) w,x,y,z."""
+    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    return np.stack([w, x, y, z], axis=1)
+
+
+def quat_conj_batch(q):
+    out = q.copy()
+    out[:, 1:] *= -1.0
+    return out
+
+
+def quat_rotvec_deg_batch(q):
+    """단위 쿼터니언 -> 회전벡터(axis*angle), deg, (N,3).
+
+    q와 -q는 같은 회전이라 w<0이면 부호를 뒤집어 항상 최단회전(각도 <=180도)
+    표현을 쓴다. 이 벡터의 노름(norm)이 quat_angle_deg()가 주는 스칼라 각도와
+    같다 -- 그 각도를 3축 성분으로 쪼갠 것뿐이다.
+    """
+    q = normalize_rows(q.copy())
+    flip = q[:, 0] < 0
+    q[flip] *= -1.0
+    w = np.clip(q[:, 0], -1.0, 1.0)
+    angle = 2.0 * np.arccos(w)  # radians, [0, pi]
+    s = np.sqrt(np.clip(1.0 - w * w, 0.0, None))
+    axis = np.zeros((len(q), 3))
+    nz = s > 1e-8
+    axis[nz] = q[nz, 1:] / s[nz, None]
+    return np.degrees(angle)[:, None] * axis
+
+
+def quat_angle_deg_axes(q1, q2):
+    """q1을 q2 기준 상대회전으로 보고, 그 회전을 (x,y,z) 3성분(deg)으로 분해한다.
+    q1,q2가 ob_in_cam 쿼터니언이므로 성분은 카메라 좌표축 기준이다."""
+    q_rel = quat_mul_batch(q1, quat_conj_batch(q2))
+    return quat_rotvec_deg_batch(q_rel)
+
+
 # ==================================================================== 구간 분류
 
 
@@ -175,11 +218,13 @@ def segment_stats(t_mm, q_fixed, pos_smooth_mm, quat_smooth, sl, still):
 
     resid_pos = ts - ref_pos                    # (n,3) mm
     resid_ang = quat_angle_deg(qs, ref_q)        # (n,) deg
+    resid_ang_xyz = quat_angle_deg_axes(qs, ref_q)  # (n,3) deg, 카메라축 기준
 
     return {
         "n": len(ts),
         "resid_pos_mm": resid_pos,
         "resid_ang_deg": resid_ang,
+        "resid_ang_xyz_deg": resid_ang_xyz,
         "pos_std_mm": resid_pos.std(axis=0),
         "pos_rms_mm": float(np.sqrt(np.mean(np.sum(resid_pos ** 2, axis=1)))),
         "rot_std_deg": float(resid_ang.std()),
@@ -240,38 +285,44 @@ def print_report(frame_id, stamp, results, skipped, pooled_still, pooled_moving)
 
 
 def make_plot(frame_id, t_mm, pos_smooth_mm, results, out_path, out_name):
+    """왼쪽 열=translation x,y,z(mm), 오른쪽 열=rotation x,y,z(deg) 잔차, 3x2."""
     import matplotlib
     if out_path:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 9), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
     colors = {"still": "#4C9F70", "moving": "#E08E45"}
     labels_seen = set()
 
     for kind, sl, _ in results:
-        for ax in axes:
+        for ax in axes.ravel():
             lbl = kind if kind not in labels_seen else None
             ax.axvspan(frame_id[sl.start], frame_id[sl.stop - 1],
                        color=colors[kind], alpha=0.15, label=lbl)
         labels_seen.add(kind)
 
     axis_names = ["x", "y", "z"]
-    for i, ax in enumerate(axes[:3]):
+    for i in range(3):
+        ax = axes[i, 0]
         ax.plot(frame_id, t_mm[:, i], color="0.3", lw=0.8, label="raw")
         ax.plot(frame_id, pos_smooth_mm[:, i], color="tab:blue", lw=1.2,
                 label="smoothed")
         ax.set_ylabel(f"{axis_names[i]} (mm)")
         ax.grid(alpha=0.3)
 
-    ax = axes[3]
-    for kind, sl, stats in results:
-        ax.plot(frame_id[sl], stats["resid_ang_deg"], color="tab:red", lw=0.9)
-    ax.set_ylabel("rot residual (deg)")
-    ax.set_xlabel("frame_id")
-    ax.grid(alpha=0.3)
+        ax = axes[i, 1]
+        for kind, sl, stats in results:
+            ax.plot(frame_id[sl], stats["resid_ang_xyz_deg"][:, i],
+                    color="tab:red", lw=0.9)
+        ax.set_ylabel(f"rot {axis_names[i]} (deg)")
+        ax.grid(alpha=0.3)
 
-    axes[0].legend(loc="upper right", fontsize=8)
+    axes[0, 0].set_title("translation")
+    axes[0, 1].set_title("rotation")
+    axes[2, 0].set_xlabel("frame_id")
+    axes[2, 1].set_xlabel("frame_id")
+    axes[0, 0].legend(loc="upper right", fontsize=8)
     fig.suptitle("Pose noise analysis (shaded = still / moving segments)")
     fig.tight_layout()
 
