@@ -104,7 +104,8 @@ def load_foundationpose(fp_root):
     # estimater.py 가 저장소 루트에 있다.
     from estimater import FoundationPose, ScorePredictor, PoseRefinePredictor  # pyright: ignore[reportMissingImports]
     import nvdiffrast.torch as dr
-    return FoundationPose, ScorePredictor, PoseRefinePredictor, dr
+    import Utils as fp_utils  # pyright: ignore[reportMissingImports]  # nvdiffrast_render() 등 시각화 유틸
+    return FoundationPose, ScorePredictor, PoseRefinePredictor, dr, fp_utils
 
 
 def make_symmetry_tfs(axis, order):
@@ -133,7 +134,8 @@ class PoseEngine:
         if self.probe:
             vram("프로세스 시작", reset_peak=True)
 
-        FoundationPose, ScorePredictor, PoseRefinePredictor, dr = load_foundationpose(args.fp_root)
+        FoundationPose, ScorePredictor, PoseRefinePredictor, dr, fp_utils = load_foundationpose(args.fp_root)
+        self.fp_utils = fp_utils
         logging.getLogger().setLevel(LOGGER_LEVEL_MAP[args.log_level])
 
         mesh = trimesh.load(args.mesh, force="mesh")
@@ -181,6 +183,16 @@ class PoseEngine:
         print("[fp] FoundationPose 초기화 완료")
         if self.probe:
             vram("가중치 로드 후")
+
+        # register()/track_one()이 돌려주는 pose는 FoundationPose가 내부적으로
+        # bbox 중심으로 재원점화한 self.est.mesh가 아니라 **원본 mesh 좌표계**
+        # 기준이다 (estimater.py의 reset_object에서 mesh를 -model_center만큼
+        # 옮기고, register/track_one 리턴 직전에 get_tf_to_centered_mesh()로
+        # 그 이동을 다시 상쇄해서 내보낸다). 오버레이 렌더링도 pose와 같은
+        # 원본 좌표계를 써야 해서, 재원점화 전 원본을 담고 있는 self.est.mesh_ori로
+        # mesh_tensors를 따로 만들어 둔다.
+        self.render_mesh = self.est.mesh_ori
+        self.render_mesh_tensors = self.fp_utils.make_mesh_tensors(self.render_mesh)
 
         self.est_refine_iter = args.est_refine_iter
         self.track_refine_iter = args.track_refine_iter
@@ -486,6 +498,43 @@ class PoseEngine:
             print("[fp] pose에 NaN - 추적 실패")
             return None
         return pose
+
+    # -------------------------------------------------------------- mesh 오버레이
+
+    def render_overlay(self, color_bgr, K, pose, alpha=0.6, outline=True):
+        """추정된 pose로 실제 mesh를 렌더링해 컬러 프레임 위에 반투명하게 씌운다.
+
+        register/track이 내부적으로 refiner/scorer용으로 쓰는 것과 같은
+        glctx(nvdiffrast CUDA 컨텍스트)·mesh_tensors를 재사용하므로 컨텍스트를
+        새로 만들지 않는다. depth==0인 픽셀이 배경이라 그걸로 실루엣 마스크를
+        만든다 (nvdiffrast_render가 배경을 0으로 밀어둔다).
+        """
+        import torch
+
+        H, W = color_bgr.shape[:2]
+        ob_in_cam = torch.as_tensor(pose.reshape(1, 4, 4), device='cuda',
+                                    dtype=torch.float)
+        rendered, depth, _ = self.fp_utils.nvdiffrast_render(
+            K=K, H=H, W=W, ob_in_cams=ob_in_cam, glctx=self.est.glctx,
+            mesh_tensors=self.render_mesh_tensors, mesh=self.render_mesh,
+            output_size=(H, W), use_light=True)
+
+        rendered = rendered[0].detach().cpu().numpy()  # (H, W, 3) RGB, 0..1
+        mask = (depth[0].detach().cpu().numpy() > 1e-6)
+        if not mask.any():
+            return color_bgr
+
+        rendered_bgr = np.clip(rendered[..., ::-1] * 255.0, 0, 255)
+        vis = color_bgr.copy().astype(np.float32)
+        vis[mask] = alpha * rendered_bgr[mask] + (1 - alpha) * vis[mask]
+        vis = vis.astype(np.uint8)
+
+        if outline:
+            m8 = mask.astype(np.uint8)
+            contours, _ = cv2.findContours(m8, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(vis, contours, -1, (0, 255, 0), 1, cv2.LINE_AA)
+        return vis
 
 
 # ==================================================================== 카메라
@@ -921,6 +970,12 @@ def main():
                          "어느 단계가 피크를 만드는지 여기서 판별한다")
 
     # ---- 출력
+    ap.add_argument("--vis-mode", default="mesh", choices=["box", "mesh", "both"],
+                    help="화면 표시 방식. box=OBB 와이어프레임(기존), "
+                         "mesh=실제 mesh를 pose에 맞춰 렌더링해 반투명하게 씌움, "
+                         "both=둘 다")
+    ap.add_argument("--overlay-alpha", type=float, default=0.6,
+                    help="--vis-mode mesh/both일 때 렌더링된 mesh의 불투명도 (0~1)")
     ap.add_argument("--pose-log", default=None,
                     help="pose를 JSON Lines로 기록할 파일 경로")
     ap.add_argument("--snapshot-dir", default="./fp_snapshots",
@@ -1015,9 +1070,14 @@ def main():
 
             # ---------------------------------------------------- 표시
             if not args.no_window:
-                vis = color.copy()
+                if args.vis_mode in ("mesh", "both"):
+                    vis = engine.render_overlay(color, K, pose,
+                                                alpha=args.overlay_alpha)
+                else:
+                    vis = color.copy()
                 center_pose = pose @ np.linalg.inv(to_origin)
-                draw_posed_3d_box(vis, K, center_pose, bbox)
+                if args.vis_mode in ("box", "both"):
+                    draw_posed_3d_box(vis, K, center_pose, bbox)
                 draw_xyz_axis(vis, K, center_pose, scale=0.06)
                 t = pose[:3, 3]
                 rpy = mat_to_euler_deg(pose[:3, :3])
