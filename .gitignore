@@ -220,4 +220,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # dev
+.vscode/
+data/
 commands.txt
