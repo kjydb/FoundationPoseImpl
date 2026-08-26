@@ -107,6 +107,22 @@ def load_foundationpose(fp_root):
     return FoundationPose, ScorePredictor, PoseRefinePredictor, dr
 
 
+def make_symmetry_tfs(axis, order):
+    """mesh 로컬 좌표계에서 axis 둘레 order-겹 회전대칭 변환들.
+
+    물체가 실제로 이 대칭을 가지는데 안 알려주면, register()의 회전 가설들이
+    "겉보기엔 똑같은" 서로 다른 회전 사이를 프레임마다 오가며 회전만 흔들리는
+    노이즈로 나타난다. 여기서 만든 변환들을 FoundationPose(symmetry_tfs=...)에
+    넘기면 rot_grid 클러스터링(mycpp.cluster_poses)이 그 대칭 후보들을 하나로
+    묶어줘서 흔들림이 줄어든다.
+    """
+    import trimesh
+    vec = {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}[axis]
+    tfs = [trimesh.transformations.rotation_matrix(2 * np.pi * k / order, vec)
+          for k in range(order)]
+    return np.stack(tfs, axis=0)
+
+
 class PoseEngine:
     """FoundationPose 래퍼. 원래 receiver_server.PoseServer에서 네트워크만 뺀 것."""
 
@@ -144,11 +160,18 @@ class PoseEngine:
         self.to_origin = to_origin
         self.bbox = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
 
+        symmetry_tfs = None
+        if args.symmetry_axis:
+            symmetry_tfs = make_symmetry_tfs(args.symmetry_axis, args.symmetry_order)
+            print(f"[fp] 대칭 등록: {args.symmetry_axis}축 {args.symmetry_order}겹 "
+                  f"({360 / args.symmetry_order:.0f}도 간격)")
+
         os.makedirs(args.debug_dir, exist_ok=True)
         self.est = FoundationPose(
             model_pts=mesh.vertices,
             model_normals=mesh.vertex_normals,
             mesh=mesh,
+            symmetry_tfs=symmetry_tfs,
             scorer=ScorePredictor(),
             refiner=PoseRefinePredictor(),
             debug_dir=args.debug_dir,
@@ -836,6 +859,13 @@ def main():
                     help="mesh 파일의 길이 단위. 틀리면 pose가 수렴하지 않는다")
     ap.add_argument("--fp-root", default=None,
                     help="FoundationPose 저장소 루트 (estimater.py가 있는 곳)")
+    ap.add_argument("--symmetry-axis", default=None, choices=["x", "y", "z"],
+                    help="물체가 이산 회전대칭이면 그 축(mesh 로컬 좌표계 기준). "
+                         "주면 --symmetry-order와 함께 FoundationPose에 대칭 "
+                         "변환을 등록해 그 축 둘레 회전 노이즈를 줄인다")
+    ap.add_argument("--symmetry-order", type=int, default=2,
+                    help="대칭 차수. 2=180도 간격(2겹), 4=90도 간격(4겹) 등. "
+                         "--symmetry-axis를 줬을 때만 쓰인다")
 
     # ---- 카메라
     ap.add_argument("--width", type=int, default=1280)
