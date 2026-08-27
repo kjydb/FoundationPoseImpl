@@ -221,6 +221,7 @@ __marimo__/
 
 # dev
 .vscode/
+bags/
 data/
 fp_debug/
 fp_logs/
