@@ -260,6 +260,9 @@ def main():
         while True:
             color_raw, depth_raw = cam.read()
             if color_raw is None:
+                if cam.is_bag and cam.bag_eof:
+                    print("[main] bag 재생 끝")
+                    break
                 continue
             color, depth, K = downscale(color_raw, depth_raw, cam.K, args.scale)
 

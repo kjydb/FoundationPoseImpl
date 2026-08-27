@@ -70,6 +70,7 @@ class D455:
             cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
         self.profile = self.pipeline.start(cfg)
         self.is_bag = bool(bag)
+        self.bag_eof = False
 
         if bag:
             # 실시간 재생을 끄면 프레임이 버려지지 않는다(추론이 느려도 안전).
@@ -152,7 +153,20 @@ class D455:
         return frames
 
     def read(self):
-        frames = self.align.process(self._latest_frames())
+        if self.bag_eof:
+            return None, None
+        try:
+            latest = self._latest_frames()
+        except RuntimeError:
+            # --repeat-bag 없이 재생하면 마지막 프레임 이후 wait_for_frames()가
+            # 새 프레임을 못 받아 타임아웃 RuntimeError를 던진다(SDK 사양).
+            # bag 재생일 때만 "끝났다"는 신호로 해석한다 -- 실카메라라면
+            # 진짜 장애(케이블 빠짐 등)이므로 그대로 올린다.
+            if self.is_bag:
+                self.bag_eof = True
+                return None, None
+            raise
+        frames = self.align.process(latest)
         cf, df = frames.get_color_frame(), frames.get_depth_frame()
         if not cf or not df:
             return None, None
